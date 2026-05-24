@@ -49,6 +49,10 @@ PKG_DIR=$(cd "$(dirname "$0")" && pwd)
 # PROJECT_ROOT is two levels up from scripts/setup/ (i.e. the repo root)
 PROJECT_ROOT=$(cd "$PKG_DIR/../.." && pwd)
 
+# Export so all child Python patch scripts can read NS3_DIR
+export NS3_DIR
+export PROJECT_ROOT
+
 echo "========================================"
 echo "  Setup PMAODV + AOMDV trên ns-3.40"
 echo "========================================"
