@@ -24,6 +24,7 @@
 #include "ns3/aomdv-module.h"
 #include "ns3/qmaodv-module.h"
 #include "ns3/saqmaodv-module.h"
+#include "ns3/qsaqmaodv-module.h"
 
 #include <iostream>
 #include <fstream>
@@ -98,9 +99,24 @@ int main(int argc, char *argv[])
   double      saLowEThresh  = 0.20;     // low-energy threshold (fraction)
   double      saAdaptPeriod = 10.0;     // periodic adaptive tick (s)
 
+  // === QS-QMAODV Queue-State Self-Adaptive hyper-parameters ===
+  double      qsAlpha0          = 0.5;   // initial α (will adapt)
+  double      qsGamma           = 0.9;   // discount (fixed)
+  double      qsEpsilon0        = 0.3;   // initial ε (will adapt)
+  double      qsW1              = 0.35;  // reward weight ACK
+  double      qsW2              = 0.30;  // reward weight 1/(delay+1)
+  double      qsW3              = 0.10;  // reward weight Energy
+  double      qsW4              = 0.25;  // reward weight 1/(queue+1)  [NEW w4]
+  double      qsLambda          = 0.1;   // λ in α_t formula
+  double      qsSeqNoWin        = 5.0;   // Δ_Seq window (s)
+  double      qsLowEThresh      = 0.20;  // low-energy threshold
+  double      qsQueueHighThresh = 0.80;  // queue HIGH_LOAD entry threshold [NEW]
+  double      qsQueueLowThresh  = 0.30;  // queue HIGH_LOAD exit  threshold [NEW]
+  double      qsAdaptPeriod     = 10.0;  // periodic adaptive tick (s)
+
   CommandLine cmd(__FILE__);
-  cmd.AddValue("protocol",       "Routing protocol (AODV|DSDV|DSR|PMAODV|AOMDV|QMAODV|SAQMAODV)", protocol);
-  cmd.AddValue("maxPaths",       "PMAODV/AOMDV/QMAODV/SAQMAODV max paths per destination", maxPaths);
+  cmd.AddValue("protocol",       "Routing protocol (AODV|DSDV|DSR|PMAODV|AOMDV|QMAODV|SAQMAODV|QSAQMAODV)", protocol);
+  cmd.AddValue("maxPaths",       "PMAODV/AOMDV/QMAODV/SAQMAODV/QSAQMAODV max paths per destination", maxPaths);
   cmd.AddValue("mobility",       "Mobility model (GAUSS|RWP)",                   mobility);
   cmd.AddValue("numNodes",       "Number of UAV nodes",                          numNodes);
   cmd.AddValue("simTime",        "Simulation time (s)",                          simTime);
@@ -138,13 +154,28 @@ int main(int argc, char *argv[])
   cmd.AddValue("saSeqNoWin",     "SA-QMAODV Δ_Seq window (s)",                   saSeqNoWin);
   cmd.AddValue("saLowEThresh",   "SA-QMAODV low-energy threshold (fraction)",    saLowEThresh);
   cmd.AddValue("saAdaptPeriod",  "SA-QMAODV periodic adaptive tick (s)",         saAdaptPeriod);
+  // QS-QMAODV Queue-State controls
+  cmd.AddValue("qsAlpha0",          "QS-QMAODV initial α (will adapt)",              qsAlpha0);
+  cmd.AddValue("qsGamma",           "QS-QMAODV discount factor γ (fixed)",           qsGamma);
+  cmd.AddValue("qsEpsilon0",        "QS-QMAODV initial ε (will adapt)",              qsEpsilon0);
+  cmd.AddValue("qsW1",              "QS-QMAODV reward weight ACK",                   qsW1);
+  cmd.AddValue("qsW2",              "QS-QMAODV reward weight 1/(delay+1)",           qsW2);
+  cmd.AddValue("qsW3",              "QS-QMAODV reward weight Energy",                qsW3);
+  cmd.AddValue("qsW4",              "QS-QMAODV reward weight 1/(queue+1) [NEW]",     qsW4);
+  cmd.AddValue("qsLambda",          "QS-QMAODV sensitivity λ in α_t formula",        qsLambda);
+  cmd.AddValue("qsSeqNoWin",        "QS-QMAODV Δ_Seq window (s)",                    qsSeqNoWin);
+  cmd.AddValue("qsLowEThresh",      "QS-QMAODV low-energy threshold (fraction)",     qsLowEThresh);
+  cmd.AddValue("qsQueueHighThresh", "QS-QMAODV queue HIGH_LOAD entry threshold",     qsQueueHighThresh);
+  cmd.AddValue("qsQueueLowThresh",  "QS-QMAODV queue HIGH_LOAD exit  threshold",     qsQueueLowThresh);
+  cmd.AddValue("qsAdaptPeriod",     "QS-QMAODV periodic adaptive tick (s)",          qsAdaptPeriod);
   cmd.Parse(argc, argv);
 
   RngSeedManager::SetSeed(1);
   RngSeedManager::SetRun(seed);
 
   std::cout << "=== FANET sim ===  protocol=" << protocol;
-  if (protocol == "PMAODV" || protocol == "AOMDV" || protocol == "QMAODV" || protocol == "SAQMAODV")
+  if (protocol == "PMAODV" || protocol == "AOMDV" || protocol == "QMAODV" ||
+      protocol == "SAQMAODV" || protocol == "QSAQMAODV")
     std::cout << "(maxPaths=" << maxPaths << ")";
   if (protocol == "QMAODV")
     std::cout << "(α=" << qmAlpha << " γ=" << qmGamma << " ε=" << qmEpsilon << ")";
@@ -152,6 +183,11 @@ int main(int argc, char *argv[])
     std::cout << "(α0=" << saAlpha0 << " γ=" << saGamma << " ε0=" << saEpsilon0
               << " w=(" << saW1 << "," << saW2 << "," << saW3 << ")"
               << " λ=" << saLambda << ")";
+  if (protocol == "QSAQMAODV")
+    std::cout << "(α0=" << qsAlpha0 << " γ=" << qsGamma << " ε0=" << qsEpsilon0
+              << " w=(" << qsW1 << "," << qsW2 << "," << qsW3 << "," << qsW4 << ")"
+              << " λ=" << qsLambda
+              << " Qhi=" << qsQueueHighThresh << " Qlo=" << qsQueueLowThresh << ")";
   std::cout << "  mob=" << mobility
             << "  N=" << numNodes
             << "  T=" << simTime << "s"
@@ -245,7 +281,8 @@ int main(int argc, char *argv[])
 
   if (protocol == "AODV" || protocol == "DSDV" ||
       protocol == "PMAODV" || protocol == "AOMDV" ||
-      protocol == "QMAODV" || protocol == "SAQMAODV") {
+      protocol == "QMAODV" || protocol == "SAQMAODV" ||
+      protocol == "QSAQMAODV") {
     InternetStackHelper internet;
     if (protocol == "AODV") {
       AodvHelper aodv;
@@ -272,7 +309,7 @@ int main(int argc, char *argv[])
       qmaodv.Set("EpsilonDecay",       DoubleValue(qmEpsilonDecay));
       qmaodv.Set("EpsilonDecayPeriod", TimeValue(Seconds(qmDecayPeriod)));
       internet.SetRoutingHelper(qmaodv);
-    } else /* SAQMAODV */ {
+    } else if (protocol == "SAQMAODV") {
       SaqmaodvHelper saqmaodv;
       saqmaodv.Set("MaxPaths",              UintegerValue(maxPaths));
       saqmaodv.Set("Alpha0",                DoubleValue(saAlpha0));
@@ -286,6 +323,23 @@ int main(int argc, char *argv[])
       saqmaodv.Set("LowEnergyThreshold",    DoubleValue(saLowEThresh));
       saqmaodv.Set("PeriodicAdaptInterval", TimeValue(Seconds(saAdaptPeriod)));
       internet.SetRoutingHelper(saqmaodv);
+    } else /* QSAQMAODV */ {
+      QsaqmaodvHelper qsaqmaodv;
+      qsaqmaodv.Set("MaxPaths",              UintegerValue(maxPaths));
+      qsaqmaodv.Set("Alpha0",                DoubleValue(qsAlpha0));
+      qsaqmaodv.Set("Gamma",                 DoubleValue(qsGamma));
+      qsaqmaodv.Set("Epsilon0",              DoubleValue(qsEpsilon0));
+      qsaqmaodv.Set("RewardW1",              DoubleValue(qsW1));
+      qsaqmaodv.Set("RewardW2",              DoubleValue(qsW2));
+      qsaqmaodv.Set("RewardW3",              DoubleValue(qsW3));
+      qsaqmaodv.Set("RewardW4",              DoubleValue(qsW4));
+      qsaqmaodv.Set("Lambda",                DoubleValue(qsLambda));
+      qsaqmaodv.Set("SeqNoWindow",           TimeValue(Seconds(qsSeqNoWin)));
+      qsaqmaodv.Set("LowEnergyThreshold",    DoubleValue(qsLowEThresh));
+      qsaqmaodv.Set("QueueHighThreshold",    DoubleValue(qsQueueHighThresh));
+      qsaqmaodv.Set("QueueLowThreshold",     DoubleValue(qsQueueLowThresh));
+      qsaqmaodv.Set("PeriodicAdaptInterval", TimeValue(Seconds(qsAdaptPeriod)));
+      internet.SetRoutingHelper(qsaqmaodv);
     }
     internet.Install(nodes);
 
@@ -435,7 +489,8 @@ int main(int argc, char *argv[])
         << "routingOverhead,totalEnergyJ,nodesDead\n";
   }
   csv << scenario << "," << protocol << "," << mobility << ","
-      << ((protocol == "PMAODV" || protocol == "AOMDV" || protocol == "QMAODV" || protocol == "SAQMAODV") ? maxPaths : 1) << ","
+      << ((protocol == "PMAODV" || protocol == "AOMDV" || protocol == "QMAODV" ||
+           protocol == "SAQMAODV" || protocol == "QSAQMAODV") ? maxPaths : 1) << ","
       << numNodes << "," << numFlows << ","
       << meanVelMin << "," << meanVelMax << "," << pktInterval << ","
       << simTime << "," << seed << ","
