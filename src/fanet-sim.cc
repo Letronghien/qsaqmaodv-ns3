@@ -34,11 +34,8 @@
 #include <sys/stat.h>
 
 using namespace ns3;
-// ns-3.42 moved BasicEnergySource/EnergySourceContainer/DeviceEnergyModelContainer
-// vào ns3::energy. ns-3.40: energy ở ns3:: trực tiếp.
-// File này dành cho ns-3.42. Cho ns-3.40 chạy:
-//   sed -i 's/energy:://g' fanet-sim.cc
-namespace energy = ns3::energy;
+// NS-3.40: EnergySourceContainer/DeviceEnergyModelContainer nằm trong ns3:: trực tiếp
+// (ns3::energy namespace chỉ có từ NS-3.42 trở đi)
 
 NS_LOG_COMPONENT_DEFINE("FanetSim");
 
@@ -103,14 +100,14 @@ int main(int argc, char *argv[])
   double      qsAlpha0          = 0.5;   // initial α (will adapt)
   double      qsGamma           = 0.9;   // discount (fixed)
   double      qsEpsilon0        = 0.3;   // initial ε (will adapt)
-  double      qsW1              = 0.35;  // reward weight ACK
+  double      qsW1              = 0.40;  // reward weight ACK            (Normal §4.2)
   double      qsW2              = 0.30;  // reward weight 1/(delay+1)
   double      qsW3              = 0.10;  // reward weight Energy
-  double      qsW4              = 0.25;  // reward weight 1/(queue+1)  [NEW w4]
+  double      qsW4              = 0.20;  // reward weight 1/(queue+1)    (Normal §4.2)
   double      qsLambda          = 0.1;   // λ in α_t formula
   double      qsSeqNoWin        = 5.0;   // Δ_Seq window (s)
   double      qsLowEThresh      = 0.20;  // low-energy threshold
-  double      qsQueueHighThresh = 0.80;  // queue HIGH_LOAD entry threshold [NEW]
+  double      qsQueueHighThresh = 0.70;  // queue HIGH_LOAD entry threshold (§4.3)
   double      qsQueueLowThresh  = 0.30;  // queue HIGH_LOAD exit  threshold [NEW]
   double      qsAdaptPeriod     = 10.0;  // periodic adaptive tick (s)
 
@@ -215,7 +212,8 @@ int main(int argc, char *argv[])
   wifiPhy.SetChannel(wifiChannel.Create());
 
   WifiMacHelper wifiMac;
-  wifiMac.SetType("ns3::AdhocWifiMac");
+  wifiMac.SetType("ns3::AdhocWifiMac",
+                  "QosSupported", BooleanValue(true));  // enable EDCA/BE_Txop for queue-state sensing
   NetDeviceContainer devices = wifi.Install(wifiPhy, wifiMac, nodes);
 
   // ====== Mobility ======
@@ -267,8 +265,8 @@ int main(int argc, char *argv[])
 
   // ====== Internet stack + routing + energy ======
   Ipv4InterfaceContainer interfaces;
-  energy::EnergySourceContainer sources;
-  energy::DeviceEnergyModelContainer deviceModels;
+  EnergySourceContainer sources;
+  DeviceEnergyModelContainer deviceModels;
 
   auto installEnergy = [&]() {
     if (!enableEnergy) return;
@@ -323,7 +321,7 @@ int main(int argc, char *argv[])
       saqmaodv.Set("LowEnergyThreshold",    DoubleValue(saLowEThresh));
       saqmaodv.Set("PeriodicAdaptInterval", TimeValue(Seconds(saAdaptPeriod)));
       internet.SetRoutingHelper(saqmaodv);
-    } else /* QSAQMAODV */ {
+    } else if (protocol == "QSAQMAODV") {
       QsaqmaodvHelper qsaqmaodv;
       qsaqmaodv.Set("MaxPaths",              UintegerValue(maxPaths));
       qsaqmaodv.Set("Alpha0",                DoubleValue(qsAlpha0));
@@ -403,101 +401,4 @@ int main(int argc, char *argv[])
   ApplicationContainer clientApps;
   double startBase = 5.0;
   for (size_t i = 0; i < flows.size(); ++i) {
-    OnOffHelper onoff("ns3::UdpSocketFactory",
-        InetSocketAddress(interfaces.GetAddress(flows[i].dst), port));
-    onoff.SetAttribute("DataRate",   StringValue(rateStr.str()));
-    onoff.SetAttribute("PacketSize", UintegerValue(pktSize));
-    onoff.SetAttribute("OnTime",
-        StringValue("ns3::ConstantRandomVariable[Constant=1.0]"));
-    onoff.SetAttribute("OffTime",
-        StringValue("ns3::ConstantRandomVariable[Constant=0.0]"));
-    ApplicationContainer app = onoff.Install(nodes.Get(flows[i].src));
-    app.Start(Seconds(startBase + 0.5 * (double)i));
-    app.Stop(Seconds(simTime - 1.0));
-    clientApps.Add(app);
-  }
-
-  // ====== FlowMonitor + overhead counter ======
-  FlowMonitorHelper flowMonHelper;
-  Ptr<FlowMonitor> monitor = flowMonHelper.InstallAll();
-
-  OverheadCounter* overhead = new OverheadCounter();
-  Config::ConnectWithoutContext(
-      "/NodeList/*/$ns3::Ipv4L3Protocol/Tx",
-      MakeCallback(&OverheadCounter::OnIpTx, overhead));
-
-  // ====== Run ======
-  Simulator::Stop(Seconds(simTime + 1.0));
-  Simulator::Run();
-
-  // ====== Compute metrics ======
-  monitor->CheckForLostPackets();
-  Ptr<Ipv4FlowClassifier> classifier =
-      DynamicCast<Ipv4FlowClassifier>(flowMonHelper.GetClassifier());
-  auto stats = monitor->GetFlowStats();
-
-  uint64_t txPackets = 0, rxPackets = 0, rxBytes = 0;
-  double sumDelay = 0.0;
-  for (auto &kv : stats) {
-    Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(kv.first);
-    if (t.destinationPort == port) {
-      txPackets += kv.second.txPackets;
-      rxPackets += kv.second.rxPackets;
-      rxBytes   += kv.second.rxBytes;
-      sumDelay  += kv.second.delaySum.GetSeconds();
-    }
-  }
-
-  double deliveryRatio  = (txPackets > 0) ? (100.0 * rxPackets / txPackets) : 0.0;
-  double avgDelayMs     = (rxPackets > 0) ? (1000.0 * sumDelay / rxPackets) : 0.0;
-  double throughputMbps = (rxBytes * 8.0) / (simTime * 1.0e6);
-  uint64_t routingOverhead = (overhead->ipTxPackets > txPackets)
-      ? (overhead->ipTxPackets - txPackets) : 0;
-
-  double totalEnergyJ = 0.0;
-  uint32_t nodesDead = 0;
-  if (enableEnergy) {
-    for (uint32_t i = 0; i < sources.GetN(); ++i) {
-      Ptr<energy::BasicEnergySource> src =
-          DynamicCast<energy::BasicEnergySource>(sources.Get(i));
-      double rem = src->GetRemainingEnergy();
-      totalEnergyJ += (initialEnergyJ - rem);
-      if (rem <= 0.0) ++nodesDead;
-    }
-  }
-
-  Simulator::Destroy();
-
-  // ====== Output ======
-  std::cout << std::fixed << std::setprecision(4);
-  std::cout << "  delivery=" << deliveryRatio << "%"
-            << "  delay="    << avgDelayMs    << "ms"
-            << "  thr="      << throughputMbps << "Mbps"
-            << "  rOver="    << routingOverhead
-            << "  E="        << totalEnergyJ  << "J"
-            << "  dead="     << nodesDead << "/" << numNodes
-            << std::endl;
-
-  struct stat st;
-  bool needHeader = (stat(csvFile.c_str(), &st) != 0) || (st.st_size == 0);
-
-  std::ofstream csv(csvFile.c_str(), std::ios::app);
-  if (needHeader) {
-    csv << "scenario,protocol,mobility,maxPaths,numNodes,numFlows,"
-        << "meanVelMin,meanVelMax,pktInterval,simTime,seed,"
-        << "deliveryRatio,avgDelayMs,throughputMbps,"
-        << "routingOverhead,totalEnergyJ,nodesDead\n";
-  }
-  csv << scenario << "," << protocol << "," << mobility << ","
-      << ((protocol == "PMAODV" || protocol == "AOMDV" || protocol == "QMAODV" ||
-           protocol == "SAQMAODV" || protocol == "QSAQMAODV") ? maxPaths : 1) << ","
-      << numNodes << "," << numFlows << ","
-      << meanVelMin << "," << meanVelMax << "," << pktInterval << ","
-      << simTime << "," << seed << ","
-      << std::fixed << std::setprecision(4)
-      << deliveryRatio << "," << avgDelayMs << "," << throughputMbps << ","
-      << routingOverhead << "," << totalEnergyJ << "," << nodesDead << "\n";
-  csv.close();
-
-  return 0;
-}
+    On
