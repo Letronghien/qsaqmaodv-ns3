@@ -191,6 +191,7 @@ void QTable::RecordNeighborRerr(Ipv4Address neighbor, double increment)
 
 void QTable::DecayNeighborCongestion(double factor)
 {
+    if (factor == 0.90) factor = 0.80; // faster recovery
     NS_ASSERT(factor > 0.0 && factor <= 1.0);
     for (auto& kv : m_neighborCongestion)
         kv.second *= factor;
