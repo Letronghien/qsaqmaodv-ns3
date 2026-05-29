@@ -133,15 +133,15 @@ class QTable
      * \p increment (default 0.25).  Repeated RERRs saturate at 1.0.
      *
      * \param neighbor  Address of the node that sent the RERR.
-     * \param increment Amount to add (default 0.25).
+     * \param increment Amount to add (default 0.05).
      */
-    void RecordNeighborRerr(Ipv4Address neighbor, double increment = 0.25);
+    void RecordNeighborRerr(Ipv4Address neighbor, double increment = 0.05);
 
     /**
      * \brief Exponential decay of all per-neighbor congestion scores.
      *
      * Called periodically (same tick as PeriodicEpsilonDecay).
-     * \p factor=0.90 → half-life ≈ 6.6 ticks.
+     * \p factor=0.80 → half-life ≈ 3 ticks (phục hồi nhanh hơn).
      *
      * \param factor  Multiplicative decay factor in (0,1].
      */
