@@ -58,22 +58,31 @@ def safe_float(v, default=0.0):
 
 # ── Aggregation helper ────────────────────────────────────────────────────────
 # Returns dict: key → {metric: (mean, std)}
-def aggregate(rows, key_col, metrics):
+def aggregate(rows, key_col, metrics, scenario_prefix=None):
     """
-    key_col: column name used as x-axis key (cast to float for sorting)
+    key_col: column name OR None (use scenario_prefix to parse from scenario tag)
+    scenario_prefix: e.g. "E" → parse float from scenario tag "E20" → 20.0
     metrics: list of column names
-    Returns sorted list of (key_val, {proto: {metric: (mean,std)}})
     """
-    # data[key][proto][metric] = [values]
     data = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for r in rows:
         proto = r.get("protocol","").strip()
         if proto not in PROTOCOLS:
             continue
-        try:
-            key = float(r[key_col])
-        except (KeyError, ValueError):
-            continue
+        # Get key value
+        if scenario_prefix is not None:
+            tag = r.get("scenario","").strip()
+            if not tag.startswith(scenario_prefix):
+                continue
+            try:
+                key = float(tag[len(scenario_prefix):])
+            except ValueError:
+                continue
+        else:
+            try:
+                key = float(r[key_col])
+            except (KeyError, ValueError):
+                continue
         for m in metrics:
             v = safe_float(r.get(m, None))
             if v is not None:
@@ -125,8 +134,9 @@ def finalize(fig, fname):
 def fig_N():
     rows = load_csv("family_N.csv")
     if not rows: return
-    agg = aggregate(rows, "numNodes",
-                    ["deliveryRatio","avgDelayMs","routingOverhead"])
+    agg = aggregate(rows, None,
+                    ["deliveryRatio","avgDelayMs","routingOverhead"],
+                    scenario_prefix="N")
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     plot_metric(axes[0], agg, "deliveryRatio",
                 "PDR (%)", "PDR vs Node Count")
@@ -143,8 +153,9 @@ def fig_N():
 def fig_S():
     rows = load_csv("family_S.csv")
     if not rows: return
-    agg = aggregate(rows, "meanVelMax",
-                    ["deliveryRatio","avgDelayMs","routingOverhead"])
+    agg = aggregate(rows, None,
+                    ["deliveryRatio","avgDelayMs","routingOverhead"],
+                    scenario_prefix="V")
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     plot_metric(axes[0], agg, "deliveryRatio",
                 "PDR (%)", "PDR vs UAV Max Speed")
@@ -161,9 +172,10 @@ def fig_S():
 def fig_L():
     rows = load_csv("family_L.csv")
     if not rows: return
-    agg = aggregate(rows, "pktInterval",
-                    ["deliveryRatio","avgDelayMs","throughputMbps"])
-    # Convert pktInterval → pps for readability (x-axis inverted)
+    agg = aggregate(rows, None,
+                    ["deliveryRatio","avgDelayMs","throughputMbps"],
+                    scenario_prefix="I")
+    # Convert pktInterval → pps for readability
     agg_pps = {}
     for interval, v in agg.items():
         pps = round(1.0 / interval, 2) if interval > 0 else 0
@@ -186,8 +198,9 @@ def fig_L():
 def fig_E():
     rows = load_csv("family_E.csv")
     if not rows: return
-    agg = aggregate(rows, "initialEnergy",
-                    ["deliveryRatio","totalEnergyJ","nodesDead"])
+    agg = aggregate(rows, None,
+                    ["deliveryRatio","totalEnergyJ","nodesDead"],
+                    scenario_prefix="E")
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     plot_metric(axes[0], agg, "deliveryRatio",
                 "PDR (%)", "PDR vs Initial Energy")
@@ -250,22 +263,27 @@ def fig_W():
 # Fig 7 — Summary bar chart: peak PDR per family
 # ─────────────────────────────────────────────────────────────────────────────
 def fig_summary():
-    families = {
-        "N (Density)":  ("family_N.csv", "numNodes",    15),
-        "S (Speed)":    ("family_S.csv", "meanVelMax",  25),
-        "L (Load)":     ("family_L.csv", "pktInterval", 0.25),
-        "E (Energy)":   ("family_E.csv", "initialEnergy", 50),
-    }
+    # (label, csv, scenario_prefix, baseline_val)
+    families = [
+        ("N (Density)",  "family_N.csv", "N", 15),
+        ("S (Speed)",    "family_S.csv", "V", 25),
+        ("L (Load)",     "family_L.csv", "I", 0.25),
+        ("E (Energy)",   "family_E.csv", "E", 50),
+    ]
 
-    baseline_pdr = {}  # proto → pdr at baseline
-    for proto in PROTOCOLS:
-        baseline_pdr[proto] = []
+    baseline_pdr = {proto: [] for proto in PROTOCOLS}
 
-    for fname, keycol, baseline_val in families.values():
+    for label, fname, prefix, baseline_val in families:
         rows = load_csv(fname)
-        if not rows: continue
-        agg = aggregate(rows, keycol, ["deliveryRatio"])
-        # find closest key to baseline_val
+        if not rows:
+            for proto in PROTOCOLS:
+                baseline_pdr[proto].append(0.0)
+            continue
+        agg = aggregate(rows, None, ["deliveryRatio"], scenario_prefix=prefix)
+        if not agg:
+            for proto in PROTOCOLS:
+                baseline_pdr[proto].append(0.0)
+            continue
         keys = np.array(sorted(agg.keys()))
         closest = keys[np.argmin(np.abs(keys - baseline_val))]
         for proto in PROTOCOLS:
@@ -273,7 +291,7 @@ def fig_summary():
             baseline_pdr[proto].append(v)
 
     fig, ax = plt.subplots(figsize=(8, 4))
-    fam_labels = list(families.keys())
+    fam_labels = [f[0] for f in families]
     x = np.arange(len(fam_labels))
     width = 0.18
     for i, proto in enumerate(PROTOCOLS):
