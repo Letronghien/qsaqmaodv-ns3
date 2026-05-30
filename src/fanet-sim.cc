@@ -59,6 +59,7 @@ int main(int argc, char *argv[])
   double      simTime       = 200.0;
   uint32_t    seed          = 1;
   double      initialEnergyJ = 50.0;
+  double      energyStdDev  = 0.0;   ///< 0 = uniform; >0 = heterogeneous energy
   double      txPowerDbm    = 16.0;
   double      areaX         = 1000.0;
   double      areaY         = 1000.0;
@@ -119,6 +120,7 @@ int main(int argc, char *argv[])
   cmd.AddValue("simTime",        "Simulation time (s)",                          simTime);
   cmd.AddValue("seed",           "RNG seed (run id)",                            seed);
   cmd.AddValue("initialEnergy",  "Initial energy per node (J)",                  initialEnergyJ);
+  cmd.AddValue("energyStdDev",  "StdDev for heterogeneous energy (0=uniform)",   energyStdDev);
   cmd.AddValue("txPowerDbm",     "Tx power (dBm)",                               txPowerDbm);
   cmd.AddValue("alpha",          "GaussMarkov alpha (0..1, lower=more random)",  alpha);
   cmd.AddValue("meanVelMin",     "Min UAV velocity (m/s)",                       meanVelMin);
@@ -270,9 +272,24 @@ int main(int argc, char *argv[])
 
   auto installEnergy = [&]() {
     if (!enableEnergy) return;
-    BasicEnergySourceHelper esHelper;
-    esHelper.Set("BasicEnergySourceInitialEnergyJ", DoubleValue(initialEnergyJ));
-    sources = esHelper.Install(nodes);
+    if (energyStdDev <= 0.0) {
+      // Uniform energy — all nodes same initial energy
+      BasicEnergySourceHelper esHelper;
+      esHelper.Set("BasicEnergySourceInitialEnergyJ", DoubleValue(initialEnergyJ));
+      sources = esHelper.Install(nodes);
+    } else {
+      // Heterogeneous energy — per-node Gaussian draw, clipped to [5, 3*mean]
+      Ptr<NormalRandomVariable> rng = CreateObject<NormalRandomVariable>();
+      rng->SetAttribute("Mean",     DoubleValue(initialEnergyJ));
+      rng->SetAttribute("Variance", DoubleValue(energyStdDev * energyStdDev));
+      for (uint32_t i = 0; i < nodes.GetN(); ++i) {
+        double e0 = rng->GetValue();
+        e0 = std::max(5.0, std::min(e0, 3.0 * initialEnergyJ));
+        BasicEnergySourceHelper esHelper;
+        esHelper.Set("BasicEnergySourceInitialEnergyJ", DoubleValue(e0));
+        sources.Add(esHelper.Install(nodes.Get(i)));
+      }
+    }
     WifiRadioEnergyModelHelper wifiEnergyHelper;
     deviceModels = wifiEnergyHelper.Install(devices, sources);
   };

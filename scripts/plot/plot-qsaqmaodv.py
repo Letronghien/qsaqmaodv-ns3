@@ -260,54 +260,170 @@ def fig_W():
     finalize(fig, "fig6_family_W.png")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fig 7 — Summary bar chart: peak PDR per family
+# Fig 7 — Family H: PDR & nodesDead vs Energy StdDev (heterogeneous energy)
+# ─────────────────────────────────────────────────────────────────────────────
+def fig_H():
+    rows = load_csv("family_H.csv")
+    if not rows: return
+    agg = aggregate(rows, None,
+                    ["deliveryRatio","nodesDead","avgDelayMs"],
+                    scenario_prefix="H")
+    if not agg: return
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    plot_metric(axes[0], agg, "deliveryRatio",
+                "PDR (%)", "PDR vs Energy Heterogeneity")
+    axes[0].set_xlabel("Energy StdDev (J)", fontsize=10)
+    plot_metric(axes[1], agg, "nodesDead",
+                "Dead Nodes", "Dead Nodes vs Energy Heterogeneity")
+    axes[1].set_xlabel("Energy StdDev (J)", fontsize=10)
+    fig.suptitle("Fig. 7 — Effect of Heterogeneous Initial Energy", fontsize=12)
+    finalize(fig, "fig7_family_H.png")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fig 8 — Family M: Mixed stress heatmap — PDR across (load x energy)
+# ─────────────────────────────────────────────────────────────────────────────
+def fig_M():
+    rows = load_csv("family_M.csv")
+    if not rows: return
+
+    # Parse scenario tag "M_I0.25_E50" → (pktInterval, E0)
+    from collections import defaultdict
+    data = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    for r in rows:
+        proto = r.get("protocol","").strip()
+        if proto not in PROTOCOLS: continue
+        tag = r.get("scenario","").strip()
+        try:
+            parts = tag.split("_")       # ['M', 'I0.25', 'E50']
+            pi  = float(parts[1][1:])    # 0.25
+            e0  = float(parts[2][1:])    # 50
+            pps = round(1.0/pi, 2) if pi > 0 else 0
+        except (IndexError, ValueError):
+            continue
+        data[pps][e0][proto].append(safe_float(r.get("deliveryRatio")))
+
+    pps_vals = sorted(data.keys())
+    e0_vals  = sorted(next(iter(data.values())).keys()) if data else []
+    if not pps_vals or not e0_vals: return
+
+    # One subplot per protocol pair: QSAQMAODV vs QMAODV — delay
+    # Show PDR grouped bar for each (pps, e0) combination
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    x_labels = [f"{p}pps\nE={e}J" for p in pps_vals for e in e0_vals]
+    x = np.arange(len(x_labels))
+    width = 0.20
+    for i, proto in enumerate(PROTOCOLS):
+        vals = []
+        for p in pps_vals:
+            for e in e0_vals:
+                v_list = data[p][e].get(proto, [])
+                vals.append(np.mean(v_list) if v_list else 0.0)
+        axes[0].bar(x + (i-1.5)*width, vals, width,
+                    label=LABELS[proto], color=COLORS[proto], alpha=0.85)
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(x_labels, fontsize=7)
+    axes[0].set_ylabel("PDR (%)", fontsize=10)
+    axes[0].set_title("PDR — Mixed Stress Scenarios", fontsize=11, fontweight='bold')
+    axes[0].legend(fontsize=8)
+    axes[0].grid(True, alpha=0.3, axis='y')
+
+    # Delay subplot
+    from collections import defaultdict as dd2
+    delay_data = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    for r in rows:
+        proto = r.get("protocol","").strip()
+        if proto not in PROTOCOLS: continue
+        tag = r.get("scenario","").strip()
+        try:
+            parts = tag.split("_")
+            pi  = float(parts[1][1:])
+            e0  = float(parts[2][1:])
+            pps = round(1.0/pi, 2) if pi > 0 else 0
+        except (IndexError, ValueError):
+            continue
+        delay_data[pps][e0][proto].append(safe_float(r.get("avgDelayMs")))
+
+    for i, proto in enumerate(PROTOCOLS):
+        vals = []
+        for p in pps_vals:
+            for e in e0_vals:
+                v_list = delay_data[p][e].get(proto, [])
+                vals.append(np.mean(v_list) if v_list else 0.0)
+        axes[1].bar(x + (i-1.5)*width, vals, width,
+                    label=LABELS[proto], color=COLORS[proto], alpha=0.85)
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(x_labels, fontsize=7)
+    axes[1].set_ylabel("E2E Delay (ms)", fontsize=10)
+    axes[1].set_title("Delay — Mixed Stress Scenarios", fontsize=11, fontweight='bold')
+    axes[1].legend(fontsize=8)
+    axes[1].grid(True, alpha=0.3, axis='y')
+
+    fig.suptitle("Fig. 8 — Mixed Stress: Load × Energy", fontsize=12)
+    finalize(fig, "fig8_family_M.png")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fig 9 — Summary bar chart: PDR & Delay at baseline across families
 # ─────────────────────────────────────────────────────────────────────────────
 def fig_summary():
-    # (label, csv, scenario_prefix, baseline_val)
     families = [
         ("N (Density)",  "family_N.csv", "N", 15),
         ("S (Speed)",    "family_S.csv", "V", 25),
         ("L (Load)",     "family_L.csv", "I", 0.25),
         ("E (Energy)",   "family_E.csv", "E", 50),
+        ("H (Hetero-E)", "family_H.csv", "H", 0),
     ]
 
-    baseline_pdr = {proto: [] for proto in PROTOCOLS}
+    baseline_pdr   = {proto: [] for proto in PROTOCOLS}
+    baseline_delay = {proto: [] for proto in PROTOCOLS}
 
     for label, fname, prefix, baseline_val in families:
         rows = load_csv(fname)
         if not rows:
             for proto in PROTOCOLS:
                 baseline_pdr[proto].append(0.0)
+                baseline_delay[proto].append(0.0)
             continue
-        agg = aggregate(rows, None, ["deliveryRatio"], scenario_prefix=prefix)
+        agg = aggregate(rows, None, ["deliveryRatio","avgDelayMs"],
+                        scenario_prefix=prefix)
         if not agg:
             for proto in PROTOCOLS:
                 baseline_pdr[proto].append(0.0)
+                baseline_delay[proto].append(0.0)
             continue
         keys = np.array(sorted(agg.keys()))
         closest = keys[np.argmin(np.abs(keys - baseline_val))]
         for proto in PROTOCOLS:
-            v = agg[closest].get(proto, {}).get("deliveryRatio", (0,0))[0]
-            baseline_pdr[proto].append(v)
+            baseline_pdr[proto].append(
+                agg[closest].get(proto, {}).get("deliveryRatio", (0,0))[0])
+            baseline_delay[proto].append(
+                agg[closest].get(proto, {}).get("avgDelayMs", (0,0))[0])
 
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     fam_labels = [f[0] for f in families]
     x = np.arange(len(fam_labels))
     width = 0.18
+
     for i, proto in enumerate(PROTOCOLS):
-        vals = baseline_pdr[proto]
-        if len(vals) == len(fam_labels):
-            ax.bar(x + (i-1.5)*width, vals, width,
-                   label=LABELS[proto], color=COLORS[proto], alpha=0.85)
-    ax.set_xticks(x)
-    ax.set_xticklabels(fam_labels, fontsize=9)
-    ax.set_ylabel("PDR (%) at Baseline", fontsize=10)
-    ax.set_title("Fig. 7 — PDR Comparison at Baseline Across Families",
-                 fontsize=11, fontweight='bold')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3, axis='y')
-    fig.tight_layout()
-    finalize(fig, "fig7_summary.png")
+        pdr_vals   = baseline_pdr[proto]
+        delay_vals = baseline_delay[proto]
+        if len(pdr_vals) == len(fam_labels):
+            axes[0].bar(x + (i-1.5)*width, pdr_vals, width,
+                        label=LABELS[proto], color=COLORS[proto], alpha=0.85)
+            axes[1].bar(x + (i-1.5)*width, delay_vals, width,
+                        label=LABELS[proto], color=COLORS[proto], alpha=0.85)
+
+    for ax, ylabel, title in zip(axes,
+            ["PDR (%) at Baseline", "E2E Delay (ms) at Baseline"],
+            ["PDR Comparison", "Delay Comparison"]):
+        ax.set_xticks(x)
+        ax.set_xticklabels(fam_labels, fontsize=8)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(title, fontsize=11, fontweight='bold')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3, axis='y')
+
+    fig.suptitle("Fig. 9 — Summary: PDR & Delay Across All Families", fontsize=12)
+    finalize(fig, "fig9_summary.png")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
@@ -321,6 +437,8 @@ fig_S()
 fig_L()
 fig_E()
 fig_W()
+fig_H()
+fig_M()
 fig_summary()
 
 print()
