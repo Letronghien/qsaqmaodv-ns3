@@ -1,0 +1,31 @@
+build_lib(
+  LIBNAME qsaqmaodv
+  SOURCE_FILES
+    helper/qsaqmaodv-helper.cc
+    model/qsaqmaodv-dpd.cc
+    model/qsaqmaodv-id-cache.cc
+    model/qsaqmaodv-neighbor.cc
+    model/qsaqmaodv-packet.cc
+    model/qsaqmaodv-routing-protocol.cc
+    model/qsaqmaodv-rqueue.cc
+    model/qsaqmaodv-rtable.cc
+    model/qsaqmaodv-qtable.cc
+  HEADER_FILES
+    helper/qsaqmaodv-helper.h
+    model/qsaqmaodv-dpd.h
+    model/qsaqmaodv-id-cache.h
+    model/qsaqmaodv-neighbor.h
+    model/qsaqmaodv-packet.h
+    model/qsaqmaodv-routing-protocol.h
+    model/qsaqmaodv-rqueue.h
+    model/qsaqmaodv-rtable.h
+    model/qsaqmaodv-qtable.h
+  LIBRARIES_TO_LINK ${libinternet}
+                    ${libwifi}
+  TEST_SOURCES
+    test/qsaqmaodv-id-cache-test-suite.cc
+    test/qsaqmaodv-regression.cc
+    test/qsaqmaodv-test-suite.cc
+    test/loopback.cc
+    test/bug-772.cc
+)
