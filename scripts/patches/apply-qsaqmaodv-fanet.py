@@ -26,7 +26,7 @@ text = FANET.read_text(encoding='utf-8')
 original = text
 
 # 1. Include
-INCLUDE_SA = '#include "ns3/saqmaodv-helper.h"'
+INCLUDE_SA = '#include "ns3/saqmaodv-module.h"'
 INCLUDE_QS = '#include "ns3/qsaqmaodv-helper.h"'
 if INCLUDE_QS not in text:
     if INCLUDE_SA in text:
