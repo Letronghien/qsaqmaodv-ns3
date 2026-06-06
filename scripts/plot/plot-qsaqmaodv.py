@@ -251,9 +251,9 @@ def fig_W():
                     xy=(0.20, opt_y), xytext=(0.27, opt_y-2),
                     fontsize=8, color="gray",
                     arrowprops=dict(arrowstyle="->", color="gray"))
-    ax.set_xlabel("w4 (Queue Weight)", fontsize=10)
+    ax.set_xlabel("w3 (Energy Weight)", fontsize=10)
     ax.set_ylabel("PDR (%)", fontsize=10)
-    ax.set_title("Fig. 6 — w4 Sensitivity Analysis", fontsize=11, fontweight='bold')
+    ax.set_title("Fig. 6 — w3 Energy Weight Sensitivity", fontsize=11, fontweight='bold')
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
