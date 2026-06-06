@@ -286,3 +286,11 @@ echo "Smoke test (6 protocols):"
 
 echo ""
 echo "Next: bash $PKG_DIR/scripts/cloud-run-parallel.sh"
+
+# ===== Step 6e: Install QSAQMAODV module =====
+echo "[6e/10] Install QSAQMAODV module (Queue-State Self-Adaptive)..."
+if [ -d "$NS3_DIR/src/qsaqmaodv" ]; then
+    rm -rf "$NS3_DIR/src/qsaqmaodv"
+fi
+cp -r "$PROJECT_ROOT/files/qsaqmaodv-module" "$NS3_DIR/src/qsaqmaodv"
+echo "  Installed: $NS3_DIR/src/qsaqmaodv"
