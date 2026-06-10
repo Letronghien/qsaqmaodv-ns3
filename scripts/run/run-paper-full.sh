@@ -280,7 +280,7 @@ family_ELONG() {
     echo "$CSV_HEADER" > "$CSV"
     for P in "${PROTOCOLS[@]}"; do
         for S in $(seq 1 "$SEEDS"); do
-            add_job "$JF" "$CSV" "$P" "$S" "ELONG" "--initialEnergy=10 --simTime=350"
+            add_job "$JF" "$CSV" "$P" "$S" "ELONG" "--initialEnergy=3 --simTime=350"
         done
     done
     dispatch "$JF" "ENERGY-LONG"

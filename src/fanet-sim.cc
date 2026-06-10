@@ -105,7 +105,8 @@ int main(int argc, char *argv[])
   double      qsW2              = 0.30;  // reward weight 1/(delay+1)
   double      qsW3              = 0.10;  // reward weight Energy
   double      qsW4              = 0.20;  // reward weight 1/(queue+1)    (Normal §4.2)
-  double      qsLambda          = 0.1;   // λ in α_t formula
+  double      qsMu              = 0.10;  // EA: EMA smoothing mu
+  double      qsKappa           = 0.50;  // EA: saturation kappa
   double      qsSeqNoWin        = 5.0;   // Δ_Seq window (s)
   double      qsLowEThresh      = 0.20;  // low-energy threshold
   double      qsQueueHighThresh = 0.70;  // queue HIGH_LOAD entry threshold (§4.3)
@@ -161,7 +162,8 @@ int main(int argc, char *argv[])
   cmd.AddValue("qsW2",              "QS-QMAODV reward weight 1/(delay+1)",           qsW2);
   cmd.AddValue("qsW3",              "QS-QMAODV reward weight Energy",                qsW3);
   cmd.AddValue("qsW4",              "QS-QMAODV reward weight 1/(queue+1) [NEW]",     qsW4);
-  cmd.AddValue("qsLambda",          "QS-QMAODV sensitivity λ in α_t formula",        qsLambda);
+  cmd.AddValue("qsMu",   "EA-QMAODV EMA mu (0.10)",    qsMu);
+  cmd.AddValue("qsKappa","EA-QMAODV saturation kappa (0.50)", qsKappa);
   cmd.AddValue("qsSeqNoWin",        "QS-QMAODV Δ_Seq window (s)",                    qsSeqNoWin);
   cmd.AddValue("qsLowEThresh",      "QS-QMAODV low-energy threshold (fraction)",     qsLowEThresh);
   cmd.AddValue("qsQueueHighThresh", "QS-QMAODV queue HIGH_LOAD entry threshold",     qsQueueHighThresh);
@@ -185,7 +187,7 @@ int main(int argc, char *argv[])
   if (protocol == "QSAQMAODV")
     std::cout << "(α0=" << qsAlpha0 << " γ=" << qsGamma << " ε0=" << qsEpsilon0
               << " w=(" << qsW1 << "," << qsW2 << "," << qsW3 << "," << qsW4 << ")"
-              << " λ=" << qsLambda
+          << " mu=" << qsMu << " kappa=" << qsKappa
               << " Qhi=" << qsQueueHighThresh << " Qlo=" << qsQueueLowThresh << ")";
   std::cout << "  mob=" << mobility
             << "  N=" << numNodes
@@ -348,7 +350,8 @@ int main(int argc, char *argv[])
       qsaqmaodv.Set("RewardW2",              DoubleValue(qsW2));
       qsaqmaodv.Set("RewardW3",              DoubleValue(qsW3));
       qsaqmaodv.Set("RewardW4",              DoubleValue(qsW4));
-      qsaqmaodv.Set("Lambda",                DoubleValue(qsLambda));
+      qsaqmaodv.Set("MuTdError",             DoubleValue(qsMu));
+      qsaqmaodv.Set("KappaTdError",          DoubleValue(qsKappa));
       qsaqmaodv.Set("SeqNoWindow",           TimeValue(Seconds(qsSeqNoWin)));
       qsaqmaodv.Set("LowEnergyThreshold",    DoubleValue(qsLowEThresh));
       qsaqmaodv.Set("QueueHighThreshold",    DoubleValue(qsQueueHighThresh));
@@ -452,7 +455,7 @@ int main(int argc, char *argv[])
   auto stats = monitor->GetFlowStats();
 
   uint64_t txPackets = 0, rxPackets = 0, rxBytes = 0;
-  double   sumDelay  = 0.0;
+  double sumDelay = 0.0;
   for (auto &kv : stats) {
     Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(kv.first);
     if (t.destinationPort == port) {
@@ -463,62 +466,56 @@ int main(int argc, char *argv[])
     }
   }
 
-  double   deliveryRatio  = (txPackets > 0) ? (100.0 * rxPackets / txPackets) : 0.0;
-  double   avgDelayMs     = (rxPackets > 0) ? (1000.0 * sumDelay  / rxPackets) : 0.0;
-  double   throughputMbps = (rxBytes * 8.0) / (simTime * 1.0e6);
+  double deliveryRatio  = (txPackets > 0) ? (100.0 * rxPackets / txPackets) : 0.0;
+  double avgDelayMs     = (rxPackets > 0) ? (1000.0 * sumDelay / rxPackets) : 0.0;
+  double throughputMbps = (rxBytes * 8.0) / (simTime * 1.0e6);
   uint64_t routingOverhead = (overhead->ipTxPackets > txPackets)
-                               ? (overhead->ipTxPackets - txPackets) : 0;
+      ? (overhead->ipTxPackets - txPackets) : 0;
 
-  double   totalEnergyJ = 0.0;
-  uint32_t nodesDead    = 0;
+  double totalEnergyJ = 0.0;
+  uint32_t nodesDead = 0;
   if (enableEnergy) {
     for (uint32_t i = 0; i < sources.GetN(); ++i) {
-      // ns-3.40: BasicEnergySource nằm trong ns3:: trực tiếp (không có energy::)
       Ptr<BasicEnergySource> src =
           DynamicCast<BasicEnergySource>(sources.Get(i));
-      if (src) {
-        double rem = src->GetRemainingEnergy();
-        totalEnergyJ += (initialEnergyJ - rem);
-        if (rem <= 0.0) ++nodesDead;
-      }
+      double rem = src->GetRemainingEnergy();
+      totalEnergyJ += (initialEnergyJ - rem);
+      if (rem <= 0.0) ++nodesDead;
     }
   }
 
   Simulator::Destroy();
-  delete overhead;
 
-  // ====== Console output ======
+  // ====== Output ======
   std::cout << std::fixed << std::setprecision(4);
-  std::cout << " delivery=" << deliveryRatio  << "%"
-            << " delay="    << avgDelayMs     << " ms"
-            << " thr="      << throughputMbps << " Mbps"
-            << " rOver="    << routingOverhead
-            << " E="        << totalEnergyJ   << " J"
-            << " dead="     << nodesDead << "/" << numNodes
+  std::cout << "  delivery=" << deliveryRatio << "%"
+            << "  delay="    << avgDelayMs    << "ms"
+            << "  thr="      << throughputMbps << "Mbps"
+            << "  rOver="    << routingOverhead
+            << "  E="        << totalEnergyJ  << "J"
+            << "  dead="     << nodesDead << "/" << numNodes
             << std::endl;
 
-  // ====== CSV ======
   struct stat st;
   bool needHeader = (stat(csvFile.c_str(), &st) != 0) || (st.st_size == 0);
+
   std::ofstream csv(csvFile.c_str(), std::ios::app);
   if (needHeader) {
     csv << "scenario,protocol,mobility,maxPaths,numNodes,numFlows,"
-           "meanVelMin,meanVelMax,pktInterval,simTime,seed,"
-           "deliveryRatio,avgDelayMs,throughputMbps,"
-           "routingOverhead,totalEnergyJ,nodesDead\n";
+        << "meanVelMin,meanVelMax,pktInterval,simTime,seed,"
+        << "deliveryRatio,avgDelayMs,throughputMbps,"
+        << "routingOverhead,totalEnergyJ,nodesDead\n";
   }
-  csv << scenario   << "," << protocol  << "," << mobility << ","
-      << ((protocol == "PMAODV"    || protocol == "AOMDV"     ||
-           protocol == "QMAODV"    || protocol == "SAQMAODV"  ||
-           protocol == "QSAQMAODV") ? maxPaths : 1)           << ","
-      << numNodes   << "," << numFlows  << ","
+  csv << scenario << "," << protocol << "," << mobility << ","
+      << ((protocol == "PMAODV" || protocol == "AOMDV" || protocol == "QMAODV" || protocol == "SAQMAODV") ? maxPaths : 1) << ","
+      << numNodes << "," << numFlows << ","
       << meanVelMin << "," << meanVelMax << "," << pktInterval << ","
-      << simTime    << "," << seed      << ","
+      << simTime << "," << seed << ","
       << std::fixed << std::setprecision(4)
-      << deliveryRatio  << "," << avgDelayMs     << ","
-      << throughputMbps << "," << routingOverhead << ","
-      << totalEnergyJ   << "," << nodesDead       << "\n";
+      << deliveryRatio << "," << avgDelayMs << "," << throughputMbps << ","
+      << routingOverhead << "," << totalEnergyJ << "," << nodesDead << "\n";
   csv.close();
+    std::cout.flush();
 
   return 0;
 }

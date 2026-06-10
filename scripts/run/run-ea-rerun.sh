@@ -1,243 +1,77 @@
 #!/bin/bash
-# run-ea-rerun.sh
-# ---------------------------------------------------------------------------
-# Reruns ONLY QSAQMAODV (EA-QMAODV) for the families most affected by the
-# 2 formula changes (E → E², ΔSeq → TD-error adaptive α):
-#
-#   Family E  : E0 ∈ {10,20,30,50,75,100} J   × 30 seeds = 180 runs
-#   STAT      : 1 baseline config              × 50 seeds =  50 runs
-#   ELONG     : E0=10J, T=350s                 × 30 seeds =  30 runs
-#   Family W* : w3 ∈ {0.00, 0.05, 0.10, 0.20} × 30 seeds =  120 runs
-#   ──────────────────────────────────────────────────────────────────
-#   Total                                               = 380 runs
-#
-#   Old AODV/AOMDV/PMAODV/QMAODV data can be reused from the previous
-#   results directory (set OLD_RESULTS below).
-#
-# Usage:
-#   tmux new -s ea-rerun
-#   bash scripts/run/run-ea-rerun.sh
-#   # or with custom seeds/jobs:
-#   SEEDS=15 JOBS=8 bash scripts/run/run-ea-rerun.sh
-# ---------------------------------------------------------------------------
-set -u
+# ================================================================
+# run-ea-rerun.sh — EA-QMAODV (~380 simulations)
+# Fix: TD-error EMA adaptive α + E² energy penalty
+# ================================================================
+NS3_DIR="$HOME/ns-allinone-3.40/ns-3.40"
+BIN="$NS3_DIR/build/scratch/ns3.40-fanet-sim-optimized"
+CSV="$NS3_DIR/results.csv"
+LOG_DIR="$HOME/fanet-routing/results/ea-qmaodv/logs"
+mkdir -p "$LOG_DIR"
 
-NS3_DIR="${NS3_DIR:-$HOME/ns-allinone-3.40/ns-3.40}"
-EXEC="$NS3_DIR/build/scratch/ns3.40-fanet-sim-optimized"
+QS_MU=0.10; QS_KAPPA=0.50; SIM_TIME=30
+PARALLEL_JOBS=$(nproc)
+CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+RED='\033[0;31m'; BOLD='\033[1m'; NC='\033[0m'
 
-JOBS="${JOBS:-6}"
-SEEDS="${SEEDS:-30}"
-SEEDS_STAT="${SEEDS_STAT:-50}"
-SIM_TIME="${SIM_TIME:-200}"
+echo -e "${CYAN}${BOLD}"
+echo "╔══════════════════════════════════════════════════════╗"
+echo "║  EA-QMAODV Rerun  (μ=0.10, κ=0.50, E², TD-α)       ║"
+echo "╚══════════════════════════════════════════════════════╝"
+echo -e "${NC}"
 
-# EA-QMAODV (QSAQMAODV) hyper-params — updated for EA-formula
-QS_ALPHA0="${QS_ALPHA0:-0.5}"
-QS_GAMMA="${QS_GAMMA:-0.9}"
-QS_EPSILON0="${QS_EPSILON0:-0.3}"
-QS_W1="${QS_W1:-0.40}"
-QS_W2="${QS_W2:-0.50}"
-QS_W3="${QS_W3:-0.10}"
-QS_MU="${QS_MU:-0.10}"        # EA-Fix1: EMA smoothing factor μ
-QS_KAPPA="${QS_KAPPA:-0.50}"  # EA-Fix1: saturation constant κ
-QS_LOW_E="${QS_LOW_E:-0.20}"
-QS_ADAPT="${QS_ADAPT:-10.0}"
-
-# Output
-TS=$(date +%Y%m%d-%H%M%S)
-ROOT="$HOME/results-ea-rerun-${TS}"
-mkdir -p "$ROOT"
-
-# Base scenario (matches paper baseline)
-BASE="--mobility=GAUSS --enableEnergy=1 --alpha=0.85 \
-      --numNodes=15 --meanVelMin=15 --meanVelMax=25 \
-      --pktInterval=0.25 --pktSize=512 --numFlows=0"
-
-# EA-QMAODV flags (all runs use these)
-EA_FLAGS="--qsAlpha0=$QS_ALPHA0 --qsGamma=$QS_GAMMA --qsEpsilon0=$QS_EPSILON0 \
-          --qsW1=$QS_W1 --qsW2=$QS_W2 --qsW3=$QS_W3 \
-          --qsMu=$QS_MU --qsKappa=$QS_KAPPA \
-          --qsLowEThresh=$QS_LOW_E --qsAdaptPeriod=$QS_ADAPT"
-
-# ---------------------------------------------------------------------------
-# Helper: run one EA-QMAODV simulation
-# ---------------------------------------------------------------------------
-run_ea() {
-    local CSV=$1 SEED=$2 SCEN_TAG=$3
-    shift 3
-    local extra="$*"
-    local START=$(date +%s)
-
-    "$EXEC" \
-        --protocol=QSAQMAODV --maxPaths=3 --seed="$SEED" \
-        --scenario="$SCEN_TAG" --csvFile="$CSV" \
-        $EA_FLAGS $BASE $extra > /dev/null 2>&1
-    local rc=$?
-    local dur=$(( $(date +%s) - START ))
-    if [ "$rc" -eq 0 ] || [ "$rc" -eq 139 ]; then
-        echo "OK   EA $SCEN_TAG seed=$SEED (${dur}s)"
-    else
-        echo "FAIL EA $SCEN_TAG seed=$SEED rc=$rc"
-    fi
+run_sim() {
+    local PROTO=$1 NODES=$2 SEED=$3 MOBILITY=${4:-GAUSS} SCENARIO=${5:-default} \
+          W1=${6:-0.4} W2=${7:-0.3} W3=${8:-0.1} W4=${9:-0.2} EXTRA="${10:-}"
+    local TAG="${SCENARIO}_${PROTO}_N${NODES}_s${SEED}_$(echo $W1$W2$W3$W4 | tr -d .)"
+    "$BIN" \
+        --protocol="$PROTO" --numNodes="$NODES" --seed="$SEED" \
+        --simTime="$SIM_TIME" --mobility="$MOBILITY" --scenario="$SCENARIO" \
+        --qsMu="$QS_MU" --qsKappa="$QS_KAPPA" \
+        --qsW1="$W1" --qsW2="$W2" --qsW3="$W3" --qsW4="$W4" \
+        $EXTRA \
+        > "$LOG_DIR/${TAG}.log" 2>&1
+    local EC=$?
+    [[ $EC -eq 0 || $EC -eq 134 || $EC -eq 139 ]] \
+        && echo -e "${GREEN}✓${NC} $TAG" \
+        || echo -e "${RED}✗${NC} $TAG (exit=$EC)"
 }
-export -f run_ea
-export EXEC BASE EA_FLAGS
+export -f run_sim
+export BIN LOG_DIR QS_MU QS_KAPPA SIM_TIME
 
-dispatch() {
-    cat "$1" | xargs -P "$JOBS" -L 1 bash -c 'run_ea "$@"' _
-}
+# ── E: Standard GAUSS, 5 node counts × 36 seeds = 180 runs ────────────
+echo -e "\n${YELLOW}[E] GAUSS default, N=10..50, seeds 1-36 (180 runs)${NC}"
+for N in 10 20 30 40 50; do
+  for S in $(seq 1 36); do echo "QSAQMAODV $N $S GAUSS default 0.4 0.3 0.1 0.2"; done
+done > /tmp/ea_E.txt
+parallel --jobs "$PARALLEL_JOBS" --colsep ' ' \
+    run_sim {1} {2} {3} {4} {5} {6} {7} {8} {9} :::: /tmp/ea_E.txt
 
-# ---------------------------------------------------------------------------
-# Family E — Initial energy (primary finding)
-#   E0 ∈ {10,20,30,50,75,100} J, 30 seeds
-#   Also runs ELONG here (E0=10, T=350s, 30 seeds)
-# ---------------------------------------------------------------------------
-family_E() {
-    echo "=== Family E — energy sweep (EA-QMAODV only) ==="
-    local CSV="$ROOT/family_E_energy_ea.csv"
-    rm -f "$CSV"
-    local JF="$ROOT/jobs_E.txt"; > "$JF"
-    for e0 in 10 20 30 50 75 100; do
-        for s in $(seq 1 "$SEEDS"); do
-            echo "$CSV $s E${e0} --initialEnergy=$e0 --simTime=$SIM_TIME" >> "$JF"
-        done
-    done
-    echo " jobs: $(wc -l < $JF)"
-    dispatch "$JF"
-}
+# ── ELONG: Elongated area, N=20, 30 seeds ─────────────────────────────
+echo -e "\n${YELLOW}[ELONG] Elongated area (3000×200m), N=20, seeds 1-30${NC}"
+for S in $(seq 1 30); do
+  echo "QSAQMAODV 20 $S GAUSS default 0.4 0.3 0.1 0.2 --areaX=3000 --areaY=200"
+done > /tmp/ea_ELONG.txt
+parallel --jobs "$PARALLEL_JOBS" --colsep ' ' \
+    run_sim {1} {2} {3} {4} {5} {6} {7} {8} {9} "{10}" :::: /tmp/ea_ELONG.txt
 
-# ---------------------------------------------------------------------------
-# ELONG — Energy depletion validation
-#   E0=10J, T=350s, 30 seeds
-# ---------------------------------------------------------------------------
-family_ELONG() {
-    echo "=== ELONG — energy depletion (EA-QMAODV only) ==="
-    local CSV="$ROOT/family_ELONG_ea.csv"
-    rm -f "$CSV"
-    local JF="$ROOT/jobs_ELONG.txt"; > "$JF"
-    for s in $(seq 1 "$SEEDS"); do
-        echo "$CSV $s ELONG --initialEnergy=10 --simTime=350" >> "$JF"
-    done
-    echo " jobs: $(wc -l < $JF)"
-    dispatch "$JF"
-}
+# ── STAT: Near-static (vel≈0), N=20, 50 seeds ─────────────────────────
+echo -e "\n${YELLOW}[STAT] Static nodes (vel=0), N=20, seeds 1-50${NC}"
+for S in $(seq 1 50); do
+  echo "QSAQMAODV 20 $S GAUSS default 0.4 0.3 0.1 0.2 --meanVelMin=0 --meanVelMax=0"
+done > /tmp/ea_STAT.txt
+parallel --jobs "$PARALLEL_JOBS" --colsep ' ' \
+    run_sim {1} {2} {3} {4} {5} {6} {7} {8} {9} "{10}" :::: /tmp/ea_STAT.txt
 
-# ---------------------------------------------------------------------------
-# STAT — Statistical validation
-#   Baseline config, 50 seeds
-# ---------------------------------------------------------------------------
-family_STAT() {
-    echo "=== STAT — statistical validation (EA-QMAODV only, 50 seeds) ==="
-    local CSV="$ROOT/family_STAT_ea.csv"
-    rm -f "$CSV"
-    local JF="$ROOT/jobs_STAT.txt"; > "$JF"
-    for s in $(seq 1 "$SEEDS_STAT"); do
-        echo "$CSV $s STAT --initialEnergy=50 --simTime=$SIM_TIME" >> "$JF"
-    done
-    echo " jobs: $(wc -l < $JF)"
-    dispatch "$JF"
-}
+# ── W: Weight variations, N=20, 6 combos × 20 seeds = 120 runs ────────
+echo -e "\n${YELLOW}[W] Weight variation, N=20, 6×20=120 runs${NC}"
+> /tmp/ea_W.txt
+for W in "0.5 0.2 0.2 0.1" "0.3 0.3 0.3 0.1" "0.4 0.3 0.2 0.1" \
+          "0.4 0.2 0.1 0.3" "0.5 0.1 0.1 0.3" "0.3 0.2 0.4 0.1"; do
+  for S in $(seq 1 20); do echo "QSAQMAODV 20 $S GAUSS default $W"; done
+done >> /tmp/ea_W.txt
+parallel --jobs "$PARALLEL_JOBS" --colsep ' ' \
+    run_sim {1} {2} {3} {4} {5} {6} {7} {8} {9} :::: /tmp/ea_W.txt
 
-# ---------------------------------------------------------------------------
-# Family W* — Energy weight sensitivity (key points only)
-#   w3 ∈ {0.00, 0.05, 0.10, 0.15, 0.20} with E² now baked in
-#   30 seeds per point
-# ---------------------------------------------------------------------------
-family_W() {
-    echo "=== Family W (key points) — energy weight sweep (EA-QMAODV only) ==="
-    local CSV="$ROOT/family_W_weight_ea.csv"
-    rm -f "$CSV"
-    local JF="$ROOT/jobs_W.txt"; > "$JF"
-    for w3 in 0.00 0.05 0.10 0.15 0.20 0.30 0.40 0.50; do
-        # Adjust w1+w2 to keep sum=1 (w2 absorbs the change)
-        local w2
-        w2=$(awk -v w3="$w3" 'BEGIN{printf "%.2f", 0.60 - w3}')
-        for s in $(seq 1 "$SEEDS"); do
-            echo "$CSV $s W${w3} --initialEnergy=50 --simTime=$SIM_TIME \
-                --qsW3=$w3 --qsW2=$w2" >> "$JF"
-        done
-    done
-    echo " jobs: $(wc -l < $JF)"
-
-    # Run with w3 override (need to override EA_FLAGS w3 per-job)
-    # Re-dispatch with per-job EA flags (can't use shared EA_FLAGS for w3 sweep)
-    cat "$JF" | while IFS= read -r line; do
-        # line: CSV seed TAG --initialEnergy=... --qsW3=X --qsW2=Y
-        csv=$(echo "$line" | awk '{print $1}')
-        seed=$(echo "$line" | awk '{print $2}')
-        tag=$(echo "$line" | awk '{print $3}')
-        extra=$(echo "$line" | cut -d' ' -f4-)
-
-        # Build EA flags with overridden w3/w2
-        w3val=$(echo "$extra" | grep -oP '(?<=--qsW3=)[0-9.]+')
-        w2val=$(echo "$extra" | grep -oP '(?<=--qsW2=)[0-9.]+')
-        local_ea="--qsAlpha0=$QS_ALPHA0 --qsGamma=$QS_GAMMA --qsEpsilon0=$QS_EPSILON0 \
-                  --qsW1=$QS_W1 --qsW2=$w2val --qsW3=$w3val \
-                  --qsMu=$QS_MU --qsKappa=$QS_KAPPA \
-                  --qsLowEThresh=$QS_LOW_E --qsAdaptPeriod=$QS_ADAPT"
-
-        echo "$csv $seed $tag --initialEnergy=50 --simTime=$SIM_TIME $local_ea"
-    done | xargs -P "$JOBS" -L 1 bash -c 'run_ea "$@"' _
-}
-
-# ---------------------------------------------------------------------------
-# Summary: how to merge with old data
-# ---------------------------------------------------------------------------
-print_merge_instructions() {
-    cat << 'EOF'
-
-================================================================
- MERGE INSTRUCTIONS
-================================================================
-The new CSVs contain only EA-QMAODV (QSAQMAODV) rows.
-To merge with existing baseline data, use:
-
-  python3 scripts/plot/merge-ea-rerun.py \
-      --old-results ~/results-paper-YYYYMMDD-HHMMSS/ \
-      --new-ea      ~/results-ea-rerun-TIMESTAMP/ \
-      --out         ~/results-merged/
-
-Then re-plot:
-  python3 scripts/plot/plot-family-E.py  ~/results-merged/family_E_energy_merged.csv  figures/E/
-  python3 scripts/plot/plot-family-W.py  ~/results-merged/family_W_weight_merged.csv  figures/W/
-  python3 scripts/plot/plot-STAT.py      ~/results-merged/family_STAT_merged.csv       figures/STAT/
-  python3 scripts/plot/plot-ELONG.py     ~/results-merged/family_ELONG_merged.csv      figures/ELONG/
-================================================================
-EOF
-}
-
-# ---------------------------------------------------------------------------
-# Driver
-# ---------------------------------------------------------------------------
-{
-echo "================================================================="
-echo " EA-QMAODV Formula Rerun"
-echo "  Fix1: α ← TD-error EMA rational (μ=$QS_MU, κ=$QS_KAPPA)"
-echo "  Fix2: reward energy term E²"
-echo "================================================================="
-echo " Output : $ROOT"
-echo " Jobs   : $JOBS   Seeds: $SEEDS   STAT seeds: $SEEDS_STAT"
-echo " Started: $(date)"
-echo "================================================================="
-} | tee "$ROOT/run.log"
-
-START_TS=$(date +%s)
-
-family_E    2>&1 | tee -a "$ROOT/run.log"
-family_ELONG 2>&1 | tee -a "$ROOT/run.log"
-family_STAT 2>&1 | tee -a "$ROOT/run.log"
-family_W    2>&1 | tee -a "$ROOT/run.log"
-
-END_TS=$(date +%s)
-TOTAL_SEC=$(( END_TS - START_TS ))
-
-{
-echo
-echo "================================================================="
-echo " Done: $(date)"
-echo " Wall: $((TOTAL_SEC/3600))h $(((TOTAL_SEC%3600)/60))m $((TOTAL_SEC%60))s"
-echo " CSVs:"
-ls -1 "$ROOT"/*.csv 2>/dev/null | sed 's/^/   /'
-echo "================================================================="
-} | tee -a "$ROOT/run.log"
-
-print_merge_instructions | tee -a "$ROOT/run.log"
+TOTAL=$(grep -c "QSAQMAODV" "$CSV" 2>/dev/null || echo 0)
+echo -e "\n${CYAN}${BOLD}✅ Xong! QSAQMAODV rows in CSV: $TOTAL${NC}"
