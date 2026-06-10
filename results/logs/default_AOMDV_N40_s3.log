@@ -1,0 +1,2 @@
+=== FANET sim ===  protocol=AOMDV(maxPaths=3)  mob=GAUSS  N=40  T=30s  seed=3  E0=50J
+  delivery=25.6860%  delay=124.3814ms  thr=0.0822Mbps  rOver=10500  E=1025.4011J  dead=0/40
