@@ -1,343 +1,127 @@
 #!/bin/bash
-# =============================================================================
-# run-paper-full.sh  —  Toàn bộ thí nghiệm cho bài báo Q3  (v4 — bugfix)
-# =============================================================================
-# FIXES so với v3:
-#   [FIX-1] dispatch(): bỏ xargs -P (stdout race condition → mất OK lines)
-#           → dùng background jobs (&) + throttle bằng jobs -rp
-#           → run_one chạy trong subshell con, không cần export -f
-#   [FIX-2] grep -c bug: grep trả về exit 1 khi 0 matches
-#           → "|| echo 0" fire cả hai → FAIL_C="0\n0" → bash error line 316
-#           → fix: tách thành 2 lệnh, dùng ${VAR:-0}
-#   [FIX-3] CSV header race condition: nhiều process đồng thời check stat()
-#           và ghi header → duplicate headers trong CSV
-#           → fix: pre-create CSV với header trước khi dispatch
-# =============================================================================
-# Usage:
-#   bash run-paper-full.sh
-#   FAMILIES="S L E" bash run-paper-full.sh
-#   RESUME=1 bash run-paper-full.sh
-#   JOBS=3   bash run-paper-full.sh
-# =============================================================================
-set -uo pipefail
+# ================================================================
+# run-paper-full.sh — Full paper comparison
+# Protocols: AODV, AOMDV, PMAODV, QMAODV, QSAQMAODV(EA-QMAODV)
+# Scenarios: E (standard) + ELONG + STAT + W (EA ablation)
+# ================================================================
+NS3_DIR="$HOME/ns-allinone-3.40/ns-3.40"
+BIN="$NS3_DIR/build/scratch/ns3.40-fanet-sim-optimized"
+CSV="$NS3_DIR/results.csv"
+LOG_DIR="$HOME/qsaqmaodv-ns3/results/logs"
+mkdir -p "$LOG_DIR"
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-NS3_DIR="${NS3_DIR:-$HOME/ns-allinone-3.40-qsaqmaodv/ns-3.40}"
-EXEC="$NS3_DIR/build/scratch/ns3.40-fanet-sim-optimized"
-JOBS="${JOBS:-6}"
-SEEDS="${SEEDS:-30}"
-SIM_TIME="${SIM_TIME:-200}"
-RESUME="${RESUME:-0}"
-FAMILIES="${FAMILIES:-N S L E W M STAT ELONG}"
-PROTOCOLS=(AODV AOMDV PMAODV QMAODV QSAQMAODV)
+SIM_TIME=30
+PARALLEL_JOBS=$(nproc)
+QS_MU=0.10; QS_KAPPA=0.50
 
-# QMAODV params
-QM_ALPHA="${QM_ALPHA:-0.5}"
-QM_GAMMA="${QM_GAMMA:-0.7}"
-QM_EPSILON="${QM_EPSILON:-0.1}"
-QM_DECAY="${QM_DECAY:-0.05}"
+CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+RED='\033[0;31m'; BOLD='\033[1m'; NC='\033[0m'
 
-# QSAQMAODV params
-QS_ALPHA0="${QS_ALPHA0:-0.5}"
-QS_GAMMA="${QS_GAMMA:-0.9}"
-QS_EPSILON0="${QS_EPSILON0:-0.3}"
-QS_LAMBDA="${QS_LAMBDA:-0.1}"
-QS_WINDOW="${QS_WINDOW:-5}"
-QS_PERIOD="${QS_PERIOD:-10.0}"
-QS_LOW_E="${QS_LOW_E:-0.20}"
-QS_Q_HI="${QS_Q_HI:-0.70}"
-QS_Q_LO="${QS_Q_LO:-0.30}"
-QS_W1="${QS_W1:-0.40}"
-QS_W2="${QS_W2:-0.30}"
-QS_W3="${QS_W3:-0.10}"
-QS_W4="${QS_W4:-0.20}"
+echo -e "${CYAN}${BOLD}"
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║  FANET Paper Comparison — Full Run                      ║"
+echo "║  AODV | AOMDV | PMAODV | QMAODV | EA-QMAODV            ║"
+echo "╚══════════════════════════════════════════════════════════╝"
+echo -e "${NC}"
 
-# ---------------------------------------------------------------------------
-# Flag strings — PHẢI là 1 dòng, không có \ + newline
-# ---------------------------------------------------------------------------
-BASE_FLAGS="--mobility=GAUSS --enableEnergy=1 --alpha=0.85 --numNodes=15 --meanVelMin=15 --meanVelMax=25 --pktInterval=0.25 --pktSize=512 --initialEnergy=50 --numFlows=0 --simTime=${SIM_TIME}"
-
-QM_FLAGS="--qmAlpha=${QM_ALPHA} --qmGamma=${QM_GAMMA} --qmEpsilon=${QM_EPSILON} --qmEpsilonDecay=${QM_DECAY}"
-
-# ---------------------------------------------------------------------------
-# CSV header — dùng chung cho tất cả family (FIX-3)
-# ---------------------------------------------------------------------------
-CSV_HEADER="scenario,protocol,mobility,maxPaths,numNodes,numFlows,meanVelMin,meanVelMax,pktInterval,simTime,seed,deliveryRatio,avgDelayMs,throughputMbps,routingOverhead,totalEnergyJ,nodesDead"
-
-# ---------------------------------------------------------------------------
-# Output
-# ---------------------------------------------------------------------------
-TS=$(date +%Y%m%d-%H%M%S)
-ROOT="$HOME/results-paper-full-${TS}"
-mkdir -p "$ROOT"
-LOGFILE="$ROOT/run_full.log"
-DONEFILE="$ROOT/done.txt"
-LOCKFILE="$ROOT/log.lock"
-touch "$DONEFILE" "$LOCKFILE"
-
-[ ! -x "$EXEC" ] && echo "[ERROR] Không tìm thấy: $EXEC" && exit 1
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-mp_for() { case "$1" in AODV|DSDV) echo 1;; *) echo 3;; esac; }
-
-qs_flags_for() {
-    [ "$1" != "QSAQMAODV" ] && return
-    local W3="${2:-${QS_W3}}"
-    local W12; W12=$(awk -v w="$W3" 'BEGIN{printf "%.4f",(1-w)/2}')
-    echo "--qsAlpha0=${QS_ALPHA0} --qsGamma=${QS_GAMMA} --qsEpsilon0=${QS_EPSILON0} --qsLambda=${QS_LAMBDA} --qsSeqNoWin=${QS_WINDOW} --qsAdaptPeriod=${QS_PERIOD} --qsLowEThresh=${QS_LOW_E} --qsQueueHighThresh=${QS_Q_HI} --qsQueueLowThresh=${QS_Q_LO} --qsW1=${W12} --qsW2=${W12} --qsW3=${W3} --qsW4=${QS_W4}"
+# Kiểm tra kết quả đã có → bỏ qua để tiết kiệm thời gian
+already_done() {
+    local PROTO=$1 NODES=$2 SEED=$3 SCENARIO=${4:-default} MOB=${5:-GAUSS}
+    grep -q "^${SCENARIO},${PROTO},${MOB},${SEED},${NODES}," "$CSV" 2>/dev/null
 }
 
-add_job() {
-    local JF="$1" CSV="$2" P="$3" S="$4" TAG="$5" SW="${6:-}"
-    local MP; MP=$(mp_for "$P")
-    local PF; PF=$(qs_flags_for "$P" "${7:-}")
-    printf '%s\n' "$CSV $P $MP $S $TAG $BASE_FLAGS $QM_FLAGS $SW $PF" | tr -s ' ' >> "$JF"
+run_sim() {
+    local PROTO=$1 NODES=$2 SEED=$3 SCENARIO=${4:-default} \
+          MOB=${5:-GAUSS} EXTRA="${6:-}"
+    local W1=0.4 W2=0.3 W3=0.1 W4=0.2
+    local TAG="${SCENARIO}_${PROTO}_N${NODES}_s${SEED}"
+
+    # Skip nếu đã có
+    grep -q "^${SCENARIO},${PROTO},${MOB},${SEED},${NODES}," "$CSV" 2>/dev/null \
+        && { echo "SKIP $TAG"; return 0; }
+
+    "$BIN" \
+        --protocol="$PROTO" --numNodes="$NODES" --seed="$SEED" \
+        --simTime="$SIM_TIME" --mobility="$MOB" --scenario="$SCENARIO" \
+        --qsMu="$QS_MU" --qsKappa="$QS_KAPPA" \
+        --qsW1="$W1" --qsW2="$W2" --qsW3="$W3" --qsW4="$W4" \
+        $EXTRA \
+        > "$LOG_DIR/${TAG}.log" 2>&1
+    local EC=$?
+    [[ $EC -eq 0 || $EC -eq 134 || $EC -eq 139 ]] \
+        && echo -e "${GREEN}✓${NC} $TAG" \
+        || echo -e "${RED}✗${NC} $TAG (exit=$EC)"
 }
+export -f run_sim
+export BIN LOG_DIR SIM_TIME QS_MU QS_KAPPA CSV
 
-# ---------------------------------------------------------------------------
-# run_one — chạy 1 simulation
-# Gọi bằng background job (&) nên không cần export -f
-# ---------------------------------------------------------------------------
-run_one() {
-    local CSV="$1" PROTO="$2" MP="$3" SEED="$4" TAG="$5"
-    shift 5
-    local EXTRA="$*"
-    local KEY="${TAG}_${PROTO}_s${SEED}"
+PROTOS_BASE="AODV AOMDV PMAODV QMAODV"
+PROTO_EA="QSAQMAODV"
 
-    if [ "${RESUME:-0}" = "1" ] && grep -qF "$KEY" "${DONEFILE}" 2>/dev/null; then
-        echo "SKIP $KEY"; return 0
-    fi
-
-    local T0; T0=$(date +%s)
-    # shellcheck disable=SC2086
-    "$EXEC" --protocol="$PROTO" --maxPaths="$MP" --seed="$SEED" \
-            --scenario="$TAG" --csvFile="$CSV" $EXTRA > /dev/null 2>&1
-    local RC=$? DUR=$(( $(date +%s) - T0 ))
-
-    if [ "$RC" -eq 0 ] || [ "$RC" -eq 139 ]; then
-        echo "$KEY" >> "$DONEFILE"
-        echo "OK   $KEY (${DUR}s)"
-    else
-        echo "FAIL $KEY rc=$RC"
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# [FIX-1] dispatch — background jobs thay vì xargs -P
-# Tránh stdout race condition: run_one là bash function trong cùng process
-# tree → stdout của mỗi background job được OS serialise qua pipe.
-# ---------------------------------------------------------------------------
-dispatch() {
-    local JF="$1" LABEL="$2"
-    echo "  → ${LABEL}: $(wc -l < "$JF") jobs"
-    while IFS= read -r line; do
-        # Throttle: đợi nếu đã có JOBS process đang chạy
-        while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do
-            sleep 0.2
-        done
-        # shellcheck disable=SC2086
-        run_one $line &
-    done < "$JF"
-    wait  # đợi tất cả job trong family xong
-}
-
-# ---------------------------------------------------------------------------
-# FAMILY N
-# ---------------------------------------------------------------------------
-family_N() {
-    echo "=== Family N — sweep số nodes ==="
-    local CSV="$ROOT/family_N_nodes.csv" JF="$ROOT/jobs_N.txt"
-    > "$JF"
-    echo "$CSV_HEADER" > "$CSV"          # [FIX-3] pre-create header
-    for N in 5 10 15 20 25 30 40 50 75 100; do
-        for P in "${PROTOCOLS[@]}"; do
-            for S in $(seq 1 "$SEEDS"); do
-                add_job "$JF" "$CSV" "$P" "$S" "N${N}" "--numNodes=${N}"
-            done
-        done
+# ── E: Standard GAUSS, N=10..50, 36 seeds × 5 protocols = 900 runs ───
+echo -e "\n${YELLOW}[E] Standard GAUSS (N=10..50, seeds 1-36, 5 protocols = 900)${NC}"
+> /tmp/paper_E.txt
+for PROTO in $PROTOS_BASE $PROTO_EA; do
+  for N in 10 20 30 40 50; do
+    for S in $(seq 1 36); do
+      echo "$PROTO $N $S default GAUSS"
     done
-    dispatch "$JF" "Family N"
+  done
+done >> /tmp/paper_E.txt
+parallel --jobs "$PARALLEL_JOBS" --colsep ' ' \
+    run_sim {1} {2} {3} {4} {5} :::: /tmp/paper_E.txt
+
+# ── ELONG: Elongated area (3000×200m), N=20, 30 seeds × 5 protocols = 150 ─
+echo -e "\n${YELLOW}[ELONG] Elongated (3000×200m), N=20, seeds 1-30, 5 proto = 150${NC}"
+> /tmp/paper_ELONG.txt
+for PROTO in $PROTOS_BASE $PROTO_EA; do
+  for S in $(seq 1 30); do
+    echo "$PROTO 20 $S default GAUSS --areaX=3000 --areaY=200"
+  done
+done >> /tmp/paper_ELONG.txt
+parallel --jobs "$PARALLEL_JOBS" --colsep ' ' \
+    run_sim {1} {2} {3} {4} {5} "{6}" :::: /tmp/paper_ELONG.txt
+
+# ── STAT: Static/low-mobility, N=20, 50 seeds × 5 protocols = 250 ────
+echo -e "\n${YELLOW}[STAT] Static (vel≈0), N=20, seeds 1-50, 5 proto = 250${NC}"
+> /tmp/paper_STAT.txt
+for PROTO in $PROTOS_BASE $PROTO_EA; do
+  for S in $(seq 1 50); do
+    echo "$PROTO 20 $S default GAUSS --meanVelMin=0 --meanVelMax=0"
+  done
+done >> /tmp/paper_STAT.txt
+parallel --jobs "$PARALLEL_JOBS" --colsep ' ' \
+    run_sim {1} {2} {3} {4} {5} "{6}" :::: /tmp/paper_STAT.txt
+
+# ── W: EA-QMAODV weight ablation only, N=20, 6 combos × 20 seeds = 120 ─
+echo -e "\n${YELLOW}[W] Weight ablation (EA-QMAODV only, 6×20=120)${NC}"
+> /tmp/paper_W.txt
+for W in "0.5 0.2 0.2 0.1" "0.3 0.3 0.3 0.1" "0.4 0.3 0.2 0.1" \
+          "0.4 0.2 0.1 0.3" "0.5 0.1 0.1 0.3" "0.3 0.2 0.4 0.1"; do
+  for S in $(seq 1 20); do
+    echo "QSAQMAODV 20 $S default GAUSS $W"
+  done
+done >> /tmp/paper_W.txt
+
+# W-family dùng run_sim variant với custom weights
+run_sim_w() {
+    local PROTO=$1 NODES=$2 SEED=$3 SCEN=$4 MOB=$5 W1=$6 W2=$7 W3=$8 W4=$9
+    local TAG="${SCEN}_${PROTO}_N${NODES}_s${SEED}_w${W1}${W2}${W3}${W4}"
+    "$BIN" \
+        --protocol="$PROTO" --numNodes="$NODES" --seed="$SEED" \
+        --simTime="$SIM_TIME" --mobility="$MOB" --scenario="$SCEN" \
+        --qsMu="$QS_MU" --qsKappa="$QS_KAPPA" \
+        --qsW1="$W1" --qsW2="$W2" --qsW3="$W3" --qsW4="$W4" \
+        > "$LOG_DIR/${TAG}.log" 2>&1
+    local EC=$?
+    [[ $EC -eq 0 || $EC -eq 134 || $EC -eq 139 ]] \
+        && echo -e "${GREEN}✓${NC} $TAG" \
+        || echo -e "${RED}✗${NC} $TAG (exit=$EC)"
 }
+export -f run_sim_w
+parallel --jobs "$PARALLEL_JOBS" --colsep ' ' \
+    run_sim_w {1} {2} {3} {4} {5} {6} {7} {8} {9} :::: /tmp/paper_W.txt
 
-# ---------------------------------------------------------------------------
-# FAMILY S
-# ---------------------------------------------------------------------------
-family_S() {
-    echo "=== Family S — sweep tốc độ ==="
-    local CSV="$ROOT/family_S_speed.csv" JF="$ROOT/jobs_S.txt"
-    > "$JF"
-    echo "$CSV_HEADER" > "$CSV"
-    for VMAX in 5 10 20 30 50 70; do
-        local VMIN; VMIN=$(awk -v v="$VMAX" 'BEGIN{printf "%.1f",v/2}')
-        for P in "${PROTOCOLS[@]}"; do
-            for S in $(seq 1 "$SEEDS"); do
-                add_job "$JF" "$CSV" "$P" "$S" "V${VMAX}" "--meanVelMin=${VMIN} --meanVelMax=${VMAX}"
-            done
-        done
-    done
-    dispatch "$JF" "Family S"
-}
-
-# ---------------------------------------------------------------------------
-# FAMILY L
-# ---------------------------------------------------------------------------
-family_L() {
-    echo "=== Family L — sweep traffic load ==="
-    local CSV="$ROOT/family_L_load.csv" JF="$ROOT/jobs_L.txt"
-    > "$JF"
-    echo "$CSV_HEADER" > "$CSV"
-    for PI in 1.0 0.5 0.25 0.1 0.05; do
-        for P in "${PROTOCOLS[@]}"; do
-            for S in $(seq 1 "$SEEDS"); do
-                add_job "$JF" "$CSV" "$P" "$S" "I${PI}" "--pktInterval=${PI}"
-            done
-        done
-    done
-    dispatch "$JF" "Family L"
-}
-
-# ---------------------------------------------------------------------------
-# FAMILY E
-# ---------------------------------------------------------------------------
-family_E() {
-    echo "=== Family E — sweep initial energy ==="
-    local CSV="$ROOT/family_E_energy.csv" JF="$ROOT/jobs_E.txt"
-    > "$JF"
-    echo "$CSV_HEADER" > "$CSV"
-    for E0 in 10 20 30 50 75 100; do
-        for P in "${PROTOCOLS[@]}"; do
-            for S in $(seq 1 "$SEEDS"); do
-                add_job "$JF" "$CSV" "$P" "$S" "E${E0}" "--initialEnergy=${E0}"
-            done
-        done
-    done
-    dispatch "$JF" "Family E"
-}
-
-# ---------------------------------------------------------------------------
-# FAMILY W  (chỉ QSAQMAODV, w1=w2=(1-w3)/2)
-# ---------------------------------------------------------------------------
-family_W() {
-    echo "=== Family W — sweep w3 (QSAQMAODV only) ==="
-    local CSV="$ROOT/family_W_weight.csv" JF="$ROOT/jobs_W.txt"
-    > "$JF"
-    echo "$CSV_HEADER" > "$CSV"
-    for W3 in 0.00 0.05 0.10 0.20 0.30 0.40 0.50; do
-        for S in $(seq 1 "$SEEDS"); do
-            add_job "$JF" "$CSV" "QSAQMAODV" "$S" "W${W3}" "" "$W3"
-        done
-    done
-    dispatch "$JF" "Family W"
-}
-
-# ---------------------------------------------------------------------------
-# FAMILY M  (3 load × 3 energy)
-# ---------------------------------------------------------------------------
-family_M() {
-    echo "=== Family M — mixed Load×Energy ==="
-    local CSV="$ROOT/family_M_mixed.csv" JF="$ROOT/jobs_M.txt"
-    > "$JF"
-    echo "$CSV_HEADER" > "$CSV"
-    for PI in 0.5 0.25 0.05; do
-        for E0 in 10 30 50; do
-            for P in "${PROTOCOLS[@]}"; do
-                for S in $(seq 1 "$SEEDS"); do
-                    add_job "$JF" "$CSV" "$P" "$S" "M_I${PI}_E${E0}" "--pktInterval=${PI} --initialEnergy=${E0}"
-                done
-            done
-        done
-    done
-    dispatch "$JF" "Family M"
-}
-
-# ---------------------------------------------------------------------------
-# STAT  (50 seeds, baseline)
-# ---------------------------------------------------------------------------
-family_STAT() {
-    echo "=== STAT — statistical validation (50 seeds) ==="
-    local CSV="$ROOT/stat_baseline.csv" JF="$ROOT/jobs_STAT.txt"
-    > "$JF"
-    echo "$CSV_HEADER" > "$CSV"
-    for P in "${PROTOCOLS[@]}"; do
-        for S in $(seq 1 50); do
-            add_job "$JF" "$CSV" "$P" "$S" "STAT" ""
-        done
-    done
-    dispatch "$JF" "STAT"
-}
-
-# ---------------------------------------------------------------------------
-# ENERGY-LONG  (E0=10J, T=350s)
-# ---------------------------------------------------------------------------
-family_ELONG() {
-    echo "=== ENERGY-LONG — energy depletion (T=350s) ==="
-    local CSV="$ROOT/elong_depletion.csv" JF="$ROOT/jobs_ELONG.txt"
-    > "$JF"
-    echo "$CSV_HEADER" > "$CSV"
-    for P in "${PROTOCOLS[@]}"; do
-        for S in $(seq 1 "$SEEDS"); do
-            add_job "$JF" "$CSV" "$P" "$S" "ELONG" "--initialEnergy=3 --simTime=350"
-        done
-    done
-    dispatch "$JF" "ENERGY-LONG"
-}
-
-# ---------------------------------------------------------------------------
-# Header
-# ---------------------------------------------------------------------------
-{
-echo "================================================================="
-echo "  Paper Q3 — Full Experiment Suite (v4 — bugfix)"
-echo "================================================================="
-echo "  NS3:      $NS3_DIR"
-echo "  Output:   $ROOT"
-echo "  Families: $FAMILIES"
-echo "  Seeds: $SEEDS | Jobs: $JOBS | SimTime: ${SIM_TIME}s"
-echo "  Protocols: ${PROTOCOLS[*]}"
-echo "  QSAQMAODV: w=($QS_W1,$QS_W2,$QS_W3,$QS_W4) λ=$QS_LAMBDA"
-echo "  Resume: $RESUME | Started: $(date)"
-echo "================================================================="
-} | tee "$LOGFILE"
-
-# ---------------------------------------------------------------------------
-# Chạy
-# ---------------------------------------------------------------------------
-START_TS=$(date +%s)
-for F in $FAMILIES; do
-    case "$F" in
-        N)     family_N    ;;
-        S)     family_S    ;;
-        L)     family_L    ;;
-        E)     family_E    ;;
-        W)     family_W    ;;
-        M)     family_M    ;;
-        STAT)  family_STAT ;;
-        ELONG) family_ELONG ;;
-        *) echo "Unknown family: $F" ;;
-    esac
-done 2>&1 | tee -a "$LOGFILE"
-
-WALL=$(( $(date +%s) - START_TS ))
-
-# [FIX-2] grep -c trả về exit 1 khi 0 matches → || echo 0 fire → "0\n0"
-# Fix: tách thành 2 lệnh riêng, dùng ${VAR:-0} làm fallback
-OK_C=$(grep -c   "^OK"   "$LOGFILE" 2>/dev/null); OK_C=${OK_C:-0}
-FAIL_C=$(grep -c "^FAIL" "$LOGFILE" 2>/dev/null); FAIL_C=${FAIL_C:-0}
-
-{
-echo ""
-echo "================================================================="
-echo "  Xong: $(date)"
-printf "  Wall: %dh %dm %ds\n" $((WALL/3600)) $(((WALL%3600)/60)) $((WALL%60))
-echo "  OK: $OK_C  |  FAIL: $FAIL_C"
-echo "  CSVs:"; ls -1 "$ROOT"/*.csv 2>/dev/null | sed 's/^/    /'
-if [ "$FAIL_C" -gt 0 ]; then
-    echo "  Top FAILs:"
-    grep "^FAIL" "$LOGFILE" | sed 's/_s[0-9]*//' | sort | uniq -c | sort -rn | head -15
-fi
-echo "================================================================="
-} | tee -a "$LOGFILE"
+TOTAL=$(wc -l < "$CSV" 2>/dev/null || echo 0)
+echo -e "\n${CYAN}${BOLD}✅ Hoàn tất! Tổng rows trong CSV: $TOTAL${NC}"
+echo -e "Results: $CSV"
